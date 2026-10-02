@@ -17,6 +17,9 @@ Visualization Manager:
     - Alpha: 1
       Class: rviz_default_plugins/LaserScan
       Color: 239; 41; 41
+      Color Transformer: Intensity
+      Channel Name: intensity
+      Autocompute Intensity Bounds: true
       Decay Time: 0
       Enabled: true
       Name: ROSiK LiDAR

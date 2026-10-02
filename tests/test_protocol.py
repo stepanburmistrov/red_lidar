@@ -2,6 +2,7 @@ from pathlib import Path
 import math
 import struct
 import sys
+import random
 
 PKG = Path(__file__).resolve().parents[1] / "ros2_ws" / "src" / "rosik_lidar"
 sys.path.insert(0, str(PKG))
@@ -9,10 +10,12 @@ sys.path.insert(0, str(PKG))
 from rosik_lidar.protocol import (
     FRAME_STRUCT,
     MSG_SCAN,
+    MSG_INTENSITY,
     StreamParser,
     build_packet,
     decode_scan_points,
     resample_scan,
+    resample_scan_with_intensity,
 )
 
 
@@ -58,3 +61,110 @@ def test_resampling():
     assert amin == -math.pi
     assert inc > 0
     assert any(math.isfinite(x) for x in ranges)
+
+
+def make_intensity_payload():
+    # Two frames x 8 quality bytes. Keep values distinctive for alignment checks.
+    return bytes(range(10, 26))
+
+
+def test_v110_scan_packet_format_is_unchanged():
+    """Regression guard: MSG_SCAN stays protocol-v1 / 20-byte fragments."""
+    payload = make_payload()
+    raw = build_packet(MSG_SCAN, 42, 1234, payload)
+    # Header fields: magic + version=1 + msg_type=1 + original payload length.
+    assert raw[:4] == b"RLDR"
+    assert raw[4] == 1
+    assert raw[5] == MSG_SCAN
+    assert len(payload) == 2 * 20
+
+
+def test_intensity_is_optional_and_does_not_change_range_decode():
+    payload = make_payload()
+    old_points = decode_scan_points(payload)
+    new_points = decode_scan_points(payload, make_intensity_payload())
+    assert [(p.angle_deg, p.distance_m) for p in new_points] == [
+        (p.angle_deg, p.distance_m) for p in old_points
+    ]
+    assert all(p.intensity == 0.0 for p in old_points)
+    assert any(p.intensity > 0.0 for p in new_points)
+
+
+def test_companion_packet_survives_fragmented_stream():
+    intensity = build_packet(MSG_INTENSITY, 77, 9000, make_intensity_payload())
+    scan = build_packet(MSG_SCAN, 77, 9000, make_payload())
+    parser = StreamParser()
+    packets = []
+    stream = intensity + scan
+    # Deliberately awkward chunking across both packet headers and CRCs.
+    sizes = [1, 2, 7, 3, 19, 5, 31, 4, 11]
+    pos = 0
+    i = 0
+    while pos < len(stream):
+        n = sizes[i % len(sizes)]
+        packets.extend(parser.feed(stream[pos:pos+n]))
+        pos += n
+        i += 1
+    assert [(p.msg_type, p.sequence) for p in packets] == [
+        (MSG_INTENSITY, 77),
+        (MSG_SCAN, 77),
+    ]
+    points = decode_scan_points(packets[1].payload, packets[0].payload)
+    assert len(points) == 16
+    assert points[0].intensity == 10.0
+    assert points[-1].intensity == 25.0
+
+
+def test_bad_intensity_packet_cannot_destroy_following_scan():
+    bad_intensity = bytearray(build_packet(MSG_INTENSITY, 99, 9000, make_intensity_payload()))
+    bad_intensity[-1] ^= 0xA5
+    good_scan = build_packet(MSG_SCAN, 99, 9000, make_payload())
+
+    parser = StreamParser()
+    packets = parser.feed(bytes(bad_intensity) + good_scan)
+    assert [p.msg_type for p in packets] == [MSG_SCAN]
+    assert parser.crc_errors >= 1
+
+    # This is the key compatibility guarantee: scan decodes without intensity.
+    points = decode_scan_points(packets[0].payload, None)
+    assert len(points) == 16
+    assert all(p.intensity == 0.0 for p in points)
+
+
+def test_resampling_with_intensity_keeps_alignment():
+    points = decode_scan_points(make_payload(), make_intensity_payload())
+    amin, amax, inc, ranges, intensities = resample_scan_with_intensity(
+        points, bins=360, mirror=False, offset_deg=0.0
+    )
+    assert len(ranges) == 360
+    assert len(intensities) == 360
+    finite_bins = [i for i, r in enumerate(ranges) if math.isfinite(r)]
+    assert finite_bins
+    assert all(intensities[i] > 0 for i in finite_bins)
+
+
+def test_500_scan_stream_never_loses_distance_when_intensity_is_bad():
+    rng = random.Random(12345)
+    wire = bytearray()
+    expected_scans = 500
+    for seq in range(expected_scans):
+        intensity = bytearray(build_packet(MSG_INTENSITY, seq, seq * 10, make_intensity_payload()))
+        if seq % 10 == 3:
+            intensity[-1] ^= 0x7F  # corrupt only optional quality packet
+        wire.extend(intensity)
+        wire.extend(build_packet(MSG_SCAN, seq, seq * 10, make_payload()))
+
+    parser = StreamParser()
+    packets = []
+    pos = 0
+    while pos < len(wire):
+        n = rng.randint(1, 97)
+        packets.extend(parser.feed(bytes(wire[pos:pos+n])))
+        pos += n
+
+    scans = [p for p in packets if p.msg_type == MSG_SCAN]
+    assert len(scans) == expected_scans
+    assert [p.sequence for p in scans] == list(range(expected_scans))
+    # 50 intentionally bad intensity packets should be counted, but must not
+    # affect the following scan packet.
+    assert parser.crc_errors >= 50

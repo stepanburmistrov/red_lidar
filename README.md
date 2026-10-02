@@ -1,214 +1,289 @@
 # ROSiK LiDAR UART
 
-A ready-to-use repository for the ROSiK 2D LiDAR path:
+Готовый проект для работы с круговым лидаром ROSiK через ESP32, Python и ROS 2 Jazzy.
 
-**LiDAR -> ESP32 -> binary UART/USB -> Python viewer or ROS 2 Jazzy `/scan`**
+ESP32 принимает пакеты лидара, управляет 8-секторным светодиодным кольцом и передаёт на компьютер полный 360° скан с расстояниями и нативной интенсивностью отражения. На компьютере данные можно смотреть в автономном Python-визуализаторе или публиковать в ROS 2 как `sensor_msgs/LaserScan` и отображать в RViz2.
 
-It also keeps the original **8-sector WS2812 ring** behaviour and the optional one-byte alarm mask output.
+## Что получится
 
-## What is included
+- полный круговой скан 360°;
+- расстояния в метрах;
+- нативная интенсивность отражения;
+- цветная визуализация в Python;
+- топик ROS 2 `/scan`;
+- цветная визуализация интенсивности в RViz2;
+- 8-секторное RGB-кольцо на ESP32;
+- проверка UART/CRC и сопоставления scan + intensity отдельным тестом.
 
-- `firmware/rosik_lidar_uart/` — ESP32 firmware: LiDAR parser, ring, full-scan collection, UART framing + CRC.
-- `tools/lidar_viewer.py` — standalone live polar visualizer for Windows/Linux, no ROS required.
-- `ros2_ws/src/rosik_lidar/` — ROS 2 `ament_python` package publishing `sensor_msgs/LaserScan` and a static `base_link -> laser` TF.
-- `rviz/lidar.rviz` — ready RViz2 view.
-- `tests/` — protocol/parser tests.
-- `docs/` — wiring and binary protocol.
+## ROSiK и лидар
 
-## Media / examples
+![ROSiK с круговым лидаром](https://rosikbot.ru/robots/rosik/cover.png)
 
-### Python live viewer screenshot
+Робот ROSiK: https://rosikbot.ru/robots/rosik/
 
-![Python LiDAR viewer screenshot](assets/media/lidar_viewer_live_scan.png)
+Лидар установлен сверху робота и используется для кругового измерения расстояний, визуализации в RViz, построения карт и дальнейших экспериментов с мобильной робототехникой.
 
-### LED ring demo GIF
+## Как выглядит результат
 
-![LED ring demo GIF](assets/media/lidar_ring_demo.gif)
+### Python-визуализатор
 
-Original video is also included: `assets/media/lidar_ring_demo.mp4`
+![Python-визуализатор ROSiK LiDAR](assets/screenshots/python_viewer.png)
 
-## Platform-specific launch guides
+### ROS 2 + RViz2, окраска по интенсивности
 
-- `docs/RUN_UBUNTU_JAZZY.md` — Ubuntu 24.04 + ROS 2 Jazzy + RViz2.
-- `docs/RUN_WINDOWS10_JAZZY.md` — Windows 10 + ROS 2 Jazzy + RViz2.
-- `docs/RUN_WSL_WINDOWS10_JAZZY.md` — WSL2 on Windows 10, COM/USB forwarding + RViz2 via X server.
+![ROSiK LiDAR в RViz2](assets/screenshots/rviz_intensity.png)
 
-## 1. Flash the ESP32
+### Светодиодное кольцо
 
-Open:
+![Работа 8-секторного светодиодного кольца](assets/media/lidar_ring_demo.gif)
 
-`firmware/rosik_lidar_uart/rosik_lidar_uart.ino`
+Исходное видео: [`assets/media/lidar_ring_demo.mp4`](assets/media/lidar_ring_demo.mp4)
 
-Arduino dependencies:
+---
 
-- ESP32 Arduino core
-- FastLED
+# С чего начать
 
-Default pins:
+## 1. Подключить лидар к ESP32
 
-- LiDAR RX: GPIO16
-- LiDAR TX: GPIO17 (usually unused)
-- WS2812 ring: GPIO14
-- optional sector-mask TX: GPIO4
+Основные подключения:
 
-The host serial stream is binary at **460800 baud**. Do **not** add `Serial.print()` diagnostics to the firmware unless you disable the binary host stream.
+| Устройство | ESP32 | Примечание |
+|---|---:|---|
+| TX лидара | GPIO16 | RX2 ESP32 |
+| RX лидара | GPIO17 | обычно не используется лидаром |
+| WS2812, DATA | GPIO14 | кольцо из 8 светодиодов |
+| дополнительный mask UART | GPIO4 | опционально |
+| GND | GND | общая земля обязательна |
 
-## 2. Standalone Python visualizer
+Подробно: [`docs/01_ESP32_И_ПОДКЛЮЧЕНИЕ.md`](docs/01_ESP32_%D0%98_%D0%9F%D0%9E%D0%94%D0%9A%D0%9B%D0%AE%D0%A7%D0%95%D0%9D%D0%98%D0%95.md)
 
-### Windows
+## 2. Прошить ESP32
+
+Открыть в Arduino IDE:
+
+```text
+firmware/rosik_lidar_uart/rosik_lidar_uart.ino
+```
+
+Нужна библиотека **FastLED** и установленная поддержка ESP32 для Arduino IDE.
+
+После прошивки ESP32 передаёт данные компьютеру через основной `Serial` на скорости **460800 бод**.
+
+## 3. Сначала проверить железо без ROS
+
+Установить Python-зависимости:
+
+```bash
+pip install -r requirements.txt
+```
+
+Windows:
 
 ```powershell
-cd ROSiK_Lidar_UART
-py -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python tools\lidar_viewer.py COM5
+python tools\hardware_smoke.py COM6 --seconds 10
 ```
 
-### Linux
+Linux:
 
 ```bash
-cd ROSiK_Lidar_UART
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python3 tools/lidar_viewer.py /dev/ttyUSB0
+python3 tools/hardware_smoke.py /dev/ttyUSB0 --seconds 10
 ```
 
-If there is exactly one serial device, you may omit the port. Useful options:
+Хороший результат заканчивается строками:
+
+```text
+[PASS] distance scan transport is stable.
+[PASS] intensity companion packets are stable.
+```
+
+Подробно: [`docs/02_PYTHON_И_ПРОВЕРКА.md`](docs/02_PYTHON_%D0%98_%D0%9F%D0%A0%D0%9E%D0%92%D0%95%D0%A0%D0%9A%D0%90.md)
+
+## 4. Посмотреть лидар в Python
+
+Windows:
+
+```powershell
+python tools\lidar_viewer.py COM6 --color-by intensity
+```
+
+Linux:
 
 ```bash
-python3 tools/lidar_viewer.py /dev/ttyUSB0 --max-range 6
-python3 tools/lidar_viewer.py /dev/ttyUSB0 --offset 180
-python3 tools/lidar_viewer.py /dev/ttyUSB0 --no-mirror
+python3 tools/lidar_viewer.py /dev/ttyUSB0 --color-by intensity
 ```
 
-The default orientation (`mirror=true`, `offset=180°`) is carried over from the existing ROSiK bridge. If the physical LiDAR is mounted differently, tune these two values.
+Для окраски по расстоянию:
 
-## 3. ROS 2 Jazzy installation
-
-Assumes Ubuntu 24.04 + ROS 2 Jazzy.
-
-```bash
-sudo apt update
-sudo apt install -y ros-jazzy-desktop python3-serial python3-colcon-common-extensions
-source /opt/ros/jazzy/setup.bash
-cd ROSiK_Lidar_UART/ros2_ws
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
-source install/setup.bash
+```powershell
+python tools\lidar_viewer.py COM6 --color-by distance
 ```
 
-Give your user access to serial ports if required:
+## 5. Выбрать свою инструкцию ROS 2
 
-```bash
-sudo usermod -aG dialout $USER
+### Windows 10
+
+[`docs/03_ROS2_WINDOWS10.md`](docs/03_ROS2_WINDOWS10.md)
+
+В инструкции отдельно разобраны `pixi`, PowerShell, `local_setup.ps1`, сборка `colcon` и запуск RViz.
+
+Установка ROS 2 под Windows 10 также подробно разобрана в уроке курса:
+https://stepik.org/lesson/2012052/step/1?unit=2040279
+
+### Ubuntu 24.04 + ROS 2 Jazzy
+
+[`docs/04_ROS2_UBUNTU.md`](docs/04_ROS2_UBUNTU.md)
+
+### Windows 10 + WSL2
+
+[`docs/05_ROS2_WSL.md`](docs/05_ROS2_WSL.md)
+
+Там отдельно разобраны проброс USB/COM в WSL и запуск RViz.
+
+## 6. RViz2
+
+Готовая конфигурация находится здесь:
+
+```text
+ros2_ws/src/rosik_lidar/rviz/lidar.rviz
 ```
 
-Log out/in once after changing the group.
+Основные параметры LaserScan:
 
-## 4. Run the ROS 2 driver
+```text
+Topic: /scan
+Reliability Policy: Best Effort
+Durability Policy: Volatile
+Color Transformer: Intensity
+Channel Name: intensity
+```
 
-Direct node:
+Подробно: [`docs/06_RVIZ.md`](docs/06_RVIZ.md)
+
+---
+
+# Структура репозитория
+
+```text
+ROSiK_LiDAR/
+├── README.md
+├── requirements.txt
+├── firmware/
+│   └── rosik_lidar_uart/
+│       └── rosik_lidar_uart.ino
+├── tools/
+│   ├── hardware_smoke.py
+│   └── lidar_viewer.py
+├── ros2_ws/
+│   └── src/
+│       └── rosik_lidar/
+│           ├── config/
+│           │   └── lidar.yaml
+│           ├── launch/
+│           │   └── lidar.launch.py
+│           ├── rosik_lidar/
+│           │   ├── protocol.py
+│           │   ├── serial_io.py
+│           │   ├── ros_node.py
+│           │   └── viewer.py
+│           └── rviz/
+│               └── lidar.rviz
+├── docs/
+├── tests/
+└── assets/
+```
+
+## Где что искать
+
+| Задача | Файл / каталог |
+|---|---|
+| Прошить ESP32 | `firmware/rosik_lidar_uart/rosik_lidar_uart.ino` |
+| Проверить UART и intensity | `tools/hardware_smoke.py` |
+| Посмотреть лидар без ROS | `tools/lidar_viewer.py` |
+| ROS 2 пакет | `ros2_ws/src/rosik_lidar/` |
+| Параметры ROS-ноды | `ros2_ws/src/rosik_lidar/config/lidar.yaml` |
+| Запуск через `ros2 launch` | `ros2_ws/src/rosik_lidar/launch/lidar.launch.py` |
+| Готовый RViz | `ros2_ws/src/rosik_lidar/rviz/lidar.rviz` |
+| Подключение ESP32 | `docs/01_ESP32_И_ПОДКЛЮЧЕНИЕ.md` |
+| Python и аппаратный тест | `docs/02_PYTHON_И_ПРОВЕРКА.md` |
+| Windows 10 | `docs/03_ROS2_WINDOWS10.md` |
+| Ubuntu | `docs/04_ROS2_UBUNTU.md` |
+| WSL | `docs/05_ROS2_WSL.md` |
+| RViz | `docs/06_RVIZ.md` |
+| UART-протокол | `docs/07_UART_ПРОТОКОЛ.md` |
+| Типовые проблемы | `docs/08_ДИАГНОСТИКА.md` |
+| Автотесты | `docs/09_ТЕСТЫ.md` |
+
+---
+
+# Быстрый запуск ROS 2
+
+После установки ROS 2 и сборки workspace:
 
 ```bash
 ros2 run rosik_lidar rosik_lidar_node --ros-args -p port:=/dev/ttyUSB0
 ```
 
-Launch file:
+Windows:
 
-```bash
-ros2 launch rosik_lidar lidar.launch.py port:=/dev/ttyUSB0
+```powershell
+ros2 run rosik_lidar rosik_lidar_node --ros-args -p port:=COM6
 ```
 
-Start the driver and the supplied RViz view together:
+Проверка:
+
+```bash
+ros2 topic hz /scan
+```
+
+Проверка intensity:
+
+```bash
+ros2 topic echo /scan --once --field intensities --qos-reliability best_effort --qos-durability volatile
+```
+
+Запуск готового launch-файла с RViz:
 
 ```bash
 ros2 launch rosik_lidar lidar.launch.py port:=/dev/ttyUSB0 rviz:=true
 ```
 
-Check data:
+Windows:
 
-```bash
-ros2 topic hz /scan
-ros2 topic echo /scan --once
-ros2 run tf2_ros tf2_echo base_link laser
+```powershell
+ros2 launch rosik_lidar lidar.launch.py port:=COM6 rviz:=true
 ```
 
-## 5. RViz2 (Jazzy)
+---
 
-After building and sourcing the workspace:
+# Полезные материалы
 
-```bash
-rviz2 -d $(ros2 pkg prefix rosik_lidar)/share/rosik_lidar/rviz/lidar.rviz
-```
+**ROSiK — реальный робот с лидаром, камерой и ROS 2**  
+https://rosikbot.ru/robots/rosik/
 
-The supplied RViz config already has:
+**ROSiK LAB — бесплатный браузерный симулятор**  
+https://rosikbot.ru/lab/
 
-- **Fixed Frame**: `base_link`
-- **LaserScan** display
-- **Topic**: `/scan`
-- **Style**: `Points`
-- top-down view
+В ROSiK LAB можно в упрощённом виде работать с мобильным роботом, двигаться по полю и читать виртуальные датчики, включая лидар.
 
-If you configure RViz manually:
+**Бесплатный курс «ROS2 — Введение в робототехнику»**  
+https://stepik.org/course/221157/syllabus
 
-1. `Global Options -> Fixed Frame = base_link` (or `laser` if you disable static TF).
-2. `Add -> By display type -> LaserScan`.
-3. Set `Topic = /scan`.
-4. Set `Reliability Policy = Best Effort` if RViz does not display points with the default QoS.
-5. Use `TopDownOrtho` for the clearest 2D view.
+**Установка ROS 2 под Windows 10**  
+https://stepik.org/lesson/2012052/step/1?unit=2040279
 
-## 6. ROS parameters
+---
 
-Defaults are in `ros2_ws/src/rosik_lidar/config/lidar.yaml`.
+# Рекомендуемый порядок работы
 
-Important parameters:
+1. Подключить лидар и LED-кольцо к ESP32.
+2. Прошить `rosik_lidar_uart.ino`.
+3. Закрыть Arduino Serial Monitor.
+4. Запустить `hardware_smoke.py`.
+5. Убедиться, что CRC = 0 и intensity сопоставляется со сканом.
+6. Запустить `lidar_viewer.py`.
+7. Только после этого переходить к ROS 2.
+8. Собрать пакет `rosik_lidar`.
+9. Проверить `/scan` через `ros2 topic echo` или `ros2 topic hz`.
+10. Запустить RViz2 и включить окраску по `Intensity`.
 
-- `port`: `/dev/ttyUSB0`
-- `baud`: `460800`
-- `frame_id`: `laser`
-- `base_frame`: `base_link`
-- `lidar_xyz`: sensor position in metres
-- `mirror`: default `true`
-- `angle_offset_deg`: default `180.0`
-- `range_min`, `range_max`
-- `scan_bins`: default `360`, giving an exactly uniform ROS `LaserScan`
-
-Example:
-
-```bash
-ros2 run rosik_lidar rosik_lidar_node --ros-args \
-  -p port:=/dev/ttyUSB0 \
-  -p mirror:=false \
-  -p angle_offset_deg:=0.0 \
-  -p lidar_xyz:="[0.05, 0.0, 0.12]"
-```
-
-## Design notes / fixes versus the supplied sources
-
-- Uses the reliable full-revolution accumulation idea from `full_firmware.ino`, but sends it over UART instead of WebSocket.
-- Preserves the 8-sector ring and one-byte mask idea from `RosikLidarRingMask.ino`.
-- Uses endpoint interpolation `i/7` for 8 samples between start/end angles.
-- Detects 360° wrap **before** appending the new revolution's first fragment; this avoids mixing the first packet of the next turn into the previous scan.
-- Host transport has magic, length, sequence, timestamp and CRC16, so both Python and ROS can recover from partial/noisy serial reads.
-- ROS output is resampled onto 360 uniform angular bins. This matches the semantics expected by `sensor_msgs/LaserScan` better than declaring a uniform increment while retaining irregular native angles.
-- No fake `map -> odom` transform is published. A standalone LiDAR driver should publish only its own sensor transform; mapping/navigation owns the rest of the TF tree.
-
-## Test
-
-Protocol tests do not require hardware:
-
-```bash
-python3 -m pytest -q
-```
-
-Hardware smoke test:
-
-1. Start the Python viewer and rotate/place flat objects around the LiDAR.
-2. Confirm all eight ring sectors correspond to the expected direction.
-3. Confirm `CRC errors` stays at 0 during normal operation.
-4. Run `ros2 topic hz /scan` and verify a stable scan frequency.
-5. Open the included RViz config and compare point orientation with the real room.
-
-If the scan is mirrored or rotated, change `mirror` and `angle_offset_deg`; do not rewrite the packet parser.
+Если что-то не работает, идти по диагностике: [`docs/08_ДИАГНОСТИКА.md`](docs/08_%D0%94%D0%98%D0%90%D0%93%D0%9D%D0%9E%D0%A1%D0%A2%D0%98%D0%9A%D0%90.md).

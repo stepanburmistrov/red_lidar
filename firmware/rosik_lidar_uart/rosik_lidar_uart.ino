@@ -28,13 +28,23 @@ static constexpr float MAX_PACKET_SPREAD_DEG = 20.0f;
 static constexpr uint32_t HOST_BAUD = 460800;
 static constexpr uint8_t PROTO_VERSION = 1;
 static constexpr uint8_t MSG_SCAN = 1;
+static constexpr uint8_t MSG_INTENSITY = 2;  // optional companion packet, same sequence as MSG_SCAN
 static constexpr uint8_t MAGIC[4] = {'R', 'L', 'D', 'R'};
+// Important for stable full-speed operation: Serial TX is unbuffered by default
+// in Arduino-ESP32. A large TX queue prevents the main loop from blocking while
+// a scan is being sent and therefore protects the LiDAR RX stream from overflow.
+static constexpr size_t HOST_TX_BUFFER = 4096;
+static constexpr size_t LIDAR_RX_BUFFER = 4096;
 
 // Packed LiDAR fragment: start angle cdeg, end angle cdeg, 8 distances mm.
 static constexpr size_t FRAME_LEN = 20;
 static constexpr uint8_t MAX_FRAMES = 64;
 static uint8_t scanBuf[MAX_FRAMES * FRAME_LEN];
+// One raw quality byte per LiDAR sample. This is deliberately kept separate
+// from MSG_SCAN so the distance packet stays byte-for-byte protocol-v1 compatible.
+static uint8_t intensityBuf[MAX_FRAMES * 8];
 static size_t scanLen = 0;
+static size_t intensityLen = 0;
 static uint8_t frameCount = 0;
 static float prevStartAngle = -1.0f;
 static uint32_t scanSequence = 0;
@@ -211,9 +221,12 @@ void sendMaskIfDue() {
 
 void appendScanFrame(float startDeg, float endDeg,
                      const uint16_t dist[8], const uint8_t quality[8]) {
-  if (frameCount >= MAX_FRAMES || scanLen + FRAME_LEN > sizeof(scanBuf)) {
+  if (frameCount >= MAX_FRAMES ||
+      scanLen + FRAME_LEN > sizeof(scanBuf) ||
+      intensityLen + 8 > sizeof(intensityBuf)) {
     frameCount = 0;
     scanLen = 0;
+    intensityLen = 0;
   }
 
   const uint16_t s = uint16_t(startDeg * 100.0f + 0.5f);
@@ -224,38 +237,68 @@ void appendScanFrame(float startDeg, float endDeg,
   scanBuf[scanLen++] = uint8_t(e >> 8);
 
   for (uint8_t i = 0; i < 8; ++i) {
+    // Distance is encoded as uint16 little-endian; zero marks a rejected sample.
     uint16_t d = 0;
     if (quality[i] >= HOST_INTENSITY_MIN && dist[i] != 0x8000) d = dist[i];
     scanBuf[scanLen++] = uint8_t(d & 0xFF);
     scanBuf[scanLen++] = uint8_t(d >> 8);
+
+    // Companion quality stream. Zero means that this sample was rejected in
+    // the distance stream, so ranges/intensities remain aligned on the host.
+    uint8_t q = 0;
+    if (quality[i] >= HOST_INTENSITY_MIN && dist[i] != 0x8000 && dist[i] != 0)
+      q = quality[i];
+    intensityBuf[intensityLen++] = q;
   }
   ++frameCount;
+}
+
+void sendHostPacket(uint8_t msgType, const uint8_t *payload, uint16_t payloadLen,
+                    uint32_t sequence, uint32_t timestampMs) {
+  uint16_t crc = 0xFFFF;
+  crc = crc16Update(crc, PROTO_VERSION);
+  crc = crc16Update(crc, msgType);
+  crc = crcFeedU16(crc, payloadLen);
+  crc = crcFeedU32(crc, sequence);
+  crc = crcFeedU32(crc, timestampMs);
+  for (uint16_t i = 0; i < payloadLen; ++i) crc = crc16Update(crc, payload[i]);
+
+  Serial.write(MAGIC, sizeof(MAGIC));
+  Serial.write(PROTO_VERSION);
+  Serial.write(msgType);
+  writeU16LE(Serial, payloadLen);
+  writeU32LE(Serial, sequence);
+  writeU32LE(Serial, timestampMs);
+  Serial.write(payload, payloadLen);
+  writeU16LE(Serial, crc);
+}
+
+size_t hostPacketWireSize(size_t payloadLen) {
+  // magic(4) + version(1) + type(1) + payload_len(2) + sequence(4) +
+  // timestamp(4) + payload + crc16(2)
+  return 18 + payloadLen;
 }
 
 void sendHostScan() {
   if (frameCount < 30 || scanLen == 0) return;
 
-  const uint16_t payloadLen = uint16_t(scanLen);
   const uint32_t sequence = scanSequence++;
   const uint32_t timestampMs = millis();
+  const bool intensityValid = intensityLen == size_t(frameCount) * 8;
 
-  // CRC covers header after MAGIC plus payload.
-  uint16_t crc = 0xFFFF;
-  crc = crc16Update(crc, PROTO_VERSION);
-  crc = crc16Update(crc, MSG_SCAN);
-  crc = crcFeedU16(crc, payloadLen);
-  crc = crcFeedU32(crc, sequence);
-  crc = crcFeedU32(crc, timestampMs);
-  for (size_t i = 0; i < scanLen; ++i) crc = crc16Update(crc, scanBuf[i]);
+  // If the TX queue can accept BOTH packets without blocking, enqueue the
+  // optional intensity packet first. The following MSG_SCAN can then be paired
+  // immediately on the host. If there is not enough queue space, intensity is
+  // skipped so that distance data always has priority.
+  const size_t bothBytes = hostPacketWireSize(scanLen) +
+                           hostPacketWireSize(intensityLen);
+  if (intensityValid && size_t(Serial.availableForWrite()) >= bothBytes) {
+    sendHostPacket(MSG_INTENSITY, intensityBuf, uint16_t(intensityLen),
+                   sequence, timestampMs);
+  }
 
-  Serial.write(MAGIC, sizeof(MAGIC));
-  Serial.write(PROTO_VERSION);
-  Serial.write(MSG_SCAN);
-  writeU16LE(Serial, payloadLen);
-  writeU32LE(Serial, sequence);
-  writeU32LE(Serial, timestampMs);
-  Serial.write(scanBuf, scanLen);
-  writeU16LE(Serial, crc);
+  // Main distance scan packet. It is always sent, even if intensity is skipped.
+  sendHostPacket(MSG_SCAN, scanBuf, uint16_t(scanLen), sequence, timestampMs);
 }
 
 bool readLidarPacket(float &startDeg, float &endDeg,
@@ -280,6 +323,9 @@ bool readLidarPacket(float &startDeg, float &endDeg,
 
 void setup() {
   // IMPORTANT: Serial is binary-only after this point. Do not print debug text here.
+  // Both calls MUST happen before begin() in Arduino-ESP32.
+  Serial.setTxBufferSize(HOST_TX_BUFFER);
+  LIDAR.setRxBufferSize(LIDAR_RX_BUFFER);
   Serial.begin(HOST_BAUD);
   LIDAR.begin(LIDAR_BAUD, SERIAL_8N1, LIDAR_RX_PIN, LIDAR_TX_PIN);
   if (ENABLE_MASK_UART) MASK_UART.begin(MASK_UART_BAUD, SERIAL_8N1, -1, MASK_UART_TX_PIN);
@@ -311,6 +357,7 @@ void loop() {
     if (wrapped && frameCount >= 30) {
       sendHostScan();
       scanLen = 0;
+      intensityLen = 0;
       frameCount = 0;
     }
 

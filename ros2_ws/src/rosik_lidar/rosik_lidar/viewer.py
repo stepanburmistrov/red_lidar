@@ -9,7 +9,7 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .protocol import decode_scan_points, transform_angle
+from .protocol import MSG_SCAN, MSG_INTENSITY, ScanIntensityPairer, decode_scan_points, transform_angle
 from .serial_io import LidarSerial, available_ports
 
 
@@ -20,6 +20,8 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-range", type=float, default=4.0, help="Plot radius in metres")
     p.add_argument("--offset", type=float, default=180.0, help="Angle offset in degrees")
     p.add_argument("--no-mirror", action="store_true", help="Disable left/right mirroring")
+    p.add_argument("--color-by", choices=("intensity", "distance"), default="intensity",
+                   help="Color points by native LiDAR intensity or distance")
     return p
 
 
@@ -56,9 +58,14 @@ def main(argv=None) -> None:
         a = math.radians(deg)
         ax.plot([a, a], [0, args.max_range], linewidth=0.8, alpha=0.25)
 
-    scatter = ax.scatter([], [], s=16, c=[], cmap="turbo", vmin=0, vmax=args.max_range)
-    cbar = fig.colorbar(scatter, ax=ax, pad=0.10, shrink=0.78)
-    cbar.set_label("Distance, m")
+    if args.color_by == "intensity":
+        scatter = ax.scatter([], [], s=16, c=[], cmap="turbo", vmin=0, vmax=255)
+        cbar = fig.colorbar(scatter, ax=ax, pad=0.10, shrink=0.78)
+        cbar.set_label("Intensity")
+    else:
+        scatter = ax.scatter([], [], s=16, c=[], cmap="turbo", vmin=0, vmax=args.max_range)
+        cbar = fig.colorbar(scatter, ax=ax, pad=0.10, shrink=0.78)
+        cbar.set_label("Distance, m")
     status = ax.text(0.02, 0.02, "Waiting for scan…", transform=ax.transAxes, fontsize=10)
     nearest_labels = [
         ax.text(math.radians(i * 45), args.max_range * 0.94, "—", ha="center", va="center", fontsize=8)
@@ -67,12 +74,21 @@ def main(argv=None) -> None:
 
     last_t = time.monotonic()
     fps = 0.0
+    pairer = ScanIntensityPairer(wait_s=0.030)
 
     try:
         while plt.fignum_exists(fig.number):
             got = False
-            for packet in link.read_packets():
-                points = decode_scan_points(packet.payload)
+            packets = link.read_packets()
+            ready = []
+            now_pair = time.monotonic()
+            for packet in packets:
+                if packet.msg_type in (MSG_SCAN, MSG_INTENSITY):
+                    ready.extend(pairer.feed(packet, now_pair))
+            ready.extend(pairer.flush(time.monotonic()))
+
+            for packet, quality_payload in ready:
+                points = decode_scan_points(packet.payload, quality_payload)
                 if not points:
                     continue
                 got = True
@@ -81,15 +97,24 @@ def main(argv=None) -> None:
                     for p in points
                 ])
                 ranges = np.array([p.distance_m for p in points])
+                qualities = np.array([p.intensity for p in points])
                 good = np.isfinite(ranges) & (ranges > 0.02) & (ranges <= args.max_range)
                 angles = angles[good]
                 ranges = ranges[good]
+                qualities = qualities[good]
 
                 if len(ranges):
                     scatter.set_offsets(np.column_stack((angles, ranges)))
-                    scatter.set_array(ranges)
+                    if args.color_by == "intensity":
+                        if quality_payload is not None:
+                            scatter.set_array(qualities)
+                        else:
+                            # Missing native intensity is shown as zero/black,
+                            # never silently replaced by distance colors.
+                            scatter.set_array(np.zeros_like(ranges))
+                    else:
+                        scatter.set_array(ranges)
 
-                # Nearest point per visual 45-degree sector.
                 mins = [math.inf] * 8
                 for a, r in zip(angles, ranges):
                     deg = math.degrees(a) % 360.0
@@ -106,6 +131,7 @@ def main(argv=None) -> None:
                 last_t = now
                 status.set_text(
                     f"scan #{packet.sequence}   {len(points)} pts   {fps:.1f} Hz\n"
+                    f"intensity: {'yes' if quality_payload is not None else 'NO'}   "
                     f"CRC errors: {link.parser.crc_errors}   port: {args.port} @ {args.baud}"
                 )
 
