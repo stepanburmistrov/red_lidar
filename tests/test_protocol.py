@@ -81,12 +81,12 @@ def test_v110_scan_packet_format_is_unchanged():
 
 def test_intensity_is_optional_and_does_not_change_range_decode():
     payload = make_payload()
-    old_points = decode_scan_points(payload)
+    points_without_intensity = decode_scan_points(payload)
     new_points = decode_scan_points(payload, make_intensity_payload())
     assert [(p.angle_deg, p.distance_m) for p in new_points] == [
-        (p.angle_deg, p.distance_m) for p in old_points
+        (p.angle_deg, p.distance_m) for p in points_without_intensity
     ]
-    assert all(p.intensity == 0.0 for p in old_points)
+    assert all(p.intensity == 0.0 for p in points_without_intensity)
     assert any(p.intensity > 0.0 for p in new_points)
 
 
@@ -125,7 +125,7 @@ def test_bad_intensity_packet_cannot_destroy_following_scan():
     assert [p.msg_type for p in packets] == [MSG_SCAN]
     assert parser.crc_errors >= 1
 
-    # This is the key compatibility guarantee: scan decodes without intensity.
+    # Основной скан должен декодироваться и без companion-пакета intensity.
     points = decode_scan_points(packets[0].payload, None)
     assert len(points) == 16
     assert all(p.intensity == 0.0 for p in points)

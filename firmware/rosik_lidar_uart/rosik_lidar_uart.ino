@@ -5,7 +5,7 @@
  *   55 AA 03 08 | speed(2) | start(2) | 8*(dist(2)+quality(1)) | end(2) | tail(2)
  *
  * Host output: binary full-scan frames over USB Serial (UART0), 460800 baud.
- * The packet format is documented in docs/PROTOCOL.md.
+ * Формат пакетов описан в docs/07_UART_ПРОТОКОЛ.md.
  *
  * Optional: one-byte red-sector mask on GPIO4 / UART1 at 115200 baud.
  ***********************************************************************/
@@ -40,8 +40,8 @@ static constexpr size_t LIDAR_RX_BUFFER = 4096;
 static constexpr size_t FRAME_LEN = 20;
 static constexpr uint8_t MAX_FRAMES = 64;
 static uint8_t scanBuf[MAX_FRAMES * FRAME_LEN];
-// One raw quality byte per LiDAR sample. This is deliberately kept separate
-// from MSG_SCAN so the distance packet stays byte-for-byte protocol-v1 compatible.
+// Один байт quality/intensity на каждое измерение лидара.
+// Интенсивность передаётся отдельным сообщением с тем же sequence, что и скан.
 static uint8_t intensityBuf[MAX_FRAMES * 8];
 static size_t scanLen = 0;
 static size_t intensityLen = 0;
@@ -69,7 +69,7 @@ float sectorDist[NUM_SECTORS];
 uint32_t sectorTime[NUM_SECTORS];
 uint32_t alarmTill[NUM_SECTORS];
 
-// Optional one-byte sector mask output, kept for compatibility.
+// Дополнительный выход: однобайтовая маска 8 секторов.
 static constexpr bool ENABLE_MASK_UART = true;
 static constexpr int MASK_UART_TX_PIN = 4;
 static constexpr uint32_t MASK_UART_BAUD = 115200;
