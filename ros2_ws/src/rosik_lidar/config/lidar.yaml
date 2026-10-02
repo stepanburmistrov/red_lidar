@@ -1,0 +1,14 @@
+rosik_lidar:
+  ros__parameters:
+    port: /dev/ttyUSB0
+    baud: 460800
+    topic: /scan
+    frame_id: laser
+    base_frame: base_link
+    publish_static_tf: true
+    lidar_xyz: [0.0, 0.0, 0.10]
+    angle_offset_deg: 180.0
+    mirror: true
+    range_min: 0.05
+    range_max: 16.0
+    scan_bins: 360
